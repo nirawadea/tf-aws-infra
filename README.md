@@ -9,6 +9,7 @@ This guide provides comprehensive steps for setting up infrastructure on AWS usi
 
 Before proceeding, ensure you have the following:
 
+
 - AWS account
 - AWS CLI installed
 - Terraform CLI installed
