@@ -1,7 +1,7 @@
 # tf-aws-infra
 # Setting Up AWS Infrastructure with Terraform
 
-## Introduction
+## Introduction of terraform
 
 This guide provides comprehensive steps for setting up infrastructure on AWS using Terraform.
 
