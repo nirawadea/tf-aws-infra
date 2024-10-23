@@ -5,7 +5,7 @@
 
 This guide provides comprehensive steps for setting up infrastructure on AWS using Terraform.
 
-## Prerequisites
+## Prerequisites for terraform
 
 Before proceeding, ensure you have the following:
 
