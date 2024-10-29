@@ -103,6 +103,92 @@ resource "aws_db_subnet_group" "db_subnet_group" {
   }
 }
 
+# Generate a unique UUID for the bucket name
+locals {
+  bucket_name = "my-dev-bucket-${uuid()}"
+}
+
+# Create a private S3 bucket with encryption, lifecycle policy, and the ability to delete non-empty buckets
+resource "aws_s3_bucket" "s3_bucket" {
+  bucket = lower(local.bucket_name)
+  force_destroy = true # Allows deletion even if bucket is not empty
+}
+
+# Restrict Public Access to the Bucket
+resource "aws_s3_bucket_public_access_block" "private_bucket" {
+  bucket = aws_s3_bucket.s3_bucket.id
+  block_public_acls        = true
+  block_public_policy      = true
+  ignore_public_acls       = true
+  restrict_public_buckets  = true
+}
+
+# Lifecycle Policy for Storage Transition to STANDARD_IA after 30 days
+resource "aws_s3_bucket_lifecycle_configuration" "bucket_lifecycle" {
+  bucket = aws_s3_bucket.s3_bucket.id
+  rule {
+    id     = "transition-to-standard-ia"
+    status = "Enabled"
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+  }
+}
+
+# Server-Side Encryption
+resource "aws_s3_bucket_server_side_encryption_configuration" "encrypt" {
+  bucket = aws_s3_bucket.s3_bucket.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# Create an IAM Role for S3 Access.
+resource "aws_iam_role" "ec2_role" {
+  name = "tf-s3-ec2-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Define the IAM policy for managing the S3 bucket
+data "aws_iam_policy_document" "s3_management_policy" {
+  statement {
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:DeleteObject",
+      "s3:ListBucket"
+    ]
+    resources = [
+      aws_s3_bucket.s3_bucket.arn,
+      "${aws_s3_bucket.s3_bucket.arn}/*"
+    ]
+  }
+  depends_on = [aws_s3_bucket.s3_bucket]
+}
+
+# Attach the S3 Access Policy to the Role
+resource "aws_iam_role_policy" "attach_s3_policy" {
+  name       = "tf-s3-policy"
+  policy     = data.aws_iam_policy_document.s3_management_policy.json
+  role       = aws_iam_role.ec2_role.name
+  depends_on = [aws_s3_bucket.s3_bucket]
+}
+
+
 # Create the RDS instance
 resource "aws_db_instance" "rds" {
   allocated_storage       = var.db_storage_size
@@ -126,6 +212,11 @@ resource "aws_db_instance" "rds" {
   }
 }
 
+#iam instance profile for ec2
+resource "aws_iam_instance_profile" "ec2_profile" {
+  role = aws_iam_role.ec2_role.name
+}
+
 # EC2 Instance
 resource "aws_instance" "app_instance" {
   ami                         = var.custom_ami_id
@@ -133,6 +224,7 @@ resource "aws_instance" "app_instance" {
   key_name                    = "cloupApp"
   subnet_id                   = aws_subnet.public_subnet[0].id
   vpc_security_group_ids      = [aws_security_group.app_sg.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2_profile.id
   associate_public_ip_address = true  # Ensure instance has a public IP
 
   # Root EBS Volume (SSD GP2, 25GB)
@@ -141,46 +233,46 @@ resource "aws_instance" "app_instance" {
     volume_type           = "gp2"
     delete_on_termination = true
   }
+  user_data = <<-EOF
+    #!/bin/bash
+    echo "DB_URL=jdbc:mysql://${aws_db_instance.rds.address}/csye6225" >> /etc/environment
+    echo "DB_USERNAME=${var.db_username}" >> /etc/environment
+    echo "DB_PASSWORD=${var.db_password}" >> /etc/environment
 
-  user_data = <<EOF
-  #!/bin/bash
-  set -e  # Exit script on error
-  set -x  # Enable debug mode for easier troubleshooting
-
-  # Clear /etc/environment file and write new environment variables
-  sudo truncate -s 0 /etc/environment
-
-  # Add environment variables
-  echo "DATABASE_ENDPOINT=${aws_db_instance.rds.address}" | sudo tee -a /etc/environment
-  echo "DATABASE_NAME=${var.db_name}" | sudo tee -a /etc/environment
-  echo "DB_USERNAME=${var.db_username}" | sudo tee -a /etc/environment
-  echo "DB_PASSWORD=${var.db_password}" | sudo tee -a /etc/environment
-
-  # Load the environment variables for the current shell session
-  set -o allexport
-  . /etc/environment
-  set +o allexport
-
-  # Ensure the application directory exists
-  mkdir -p /opt/cloudApp
-
-  # Wait for 30 seconds to ensure services are ready (you can adjust this)
-  sleep 30
-
-  # Restart the systemd service to load new environment variables
-  sudo systemctl daemon-reload
-
-  # Enable and start the application service
-  sudo systemctl enable csye6225.service
-  sudo systemctl start csye6225.service
-
-  # Check the status of the service
-  sudo systemctl status csye6225.service
+    source /etc/environment
+    # Restart the application to ensure it picks up the environment variables
+    sudo systemctl restart myapp.service
   EOF
-
 
   tags = {
     Name = "ec2-app-instance"
   }
   depends_on = [aws_db_instance.rds]
 }
+
+# Find the Hosted Zone
+data "aws_route53_zone" "selected_zone"{
+  name = var.domain_name
+}
+
+# Create or Update Route 53 A Record
+resource "aws_route53_record" "app_record" {
+  name    = data.aws_route53_zone.selected_zone.name
+  type    = "A"
+  zone_id = data.aws_route53_zone.selected_zone.id
+  ttl     = "60"
+  # Set the record to the EC2 instance's public IP
+  records = [aws_instance.app_instance.public_ip]
+}
+
+data "aws_iam_policy" "agent_policy" {
+  arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "agent_policy_attachment" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = data.aws_iam_policy.agent_policy.arn
+}
+
+
+

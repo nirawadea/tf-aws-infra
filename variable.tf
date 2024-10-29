@@ -92,3 +92,9 @@ variable "db_multiaz" {
   type        = bool
   default     = false
 }
+
+variable "domain_name" {
+  description = "Name of domain"
+  type        =  string
+  default     = "dev.aayukacloudnative.me"
+}
