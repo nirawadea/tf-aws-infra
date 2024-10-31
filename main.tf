@@ -238,10 +238,17 @@ resource "aws_instance" "app_instance" {
     echo "DB_URL=jdbc:mysql://${aws_db_instance.rds.address}/csye6225" >> /etc/environment
     echo "DB_USERNAME=${var.db_username}" >> /etc/environment
     echo "DB_PASSWORD=${var.db_password}" >> /etc/environment
+    echo "S3_BUCKET_NAME=${aws_s3_bucket.s3_bucket.id}" >> /etc/environment
+    echo "FILESYSTEM_DRIVER=s3" >> /etc/environment
+    echo "REGION=${var.provider_region}" >> /etc/environment
 
     source /etc/environment
+
+    #Restart cloudwatch
+    sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/cloudwatch-config.json -s
+
     # Restart the application to ensure it picks up the environment variables
-    sudo systemctl restart myapp.service
+    sudo systemctl restart csye6225.service
   EOF
 
   tags = {
