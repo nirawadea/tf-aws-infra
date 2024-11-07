@@ -19,19 +19,19 @@ variable "provider_region" {
 variable "public_subnet_cidrs" {
   description = "CIDR blocks for the public subnets"
   type        = list(string)
- 
+
 }
 
 variable "private_subnet_cidrs" {
   description = "CIDR blocks for the private subnets"
   type        = list(string)
-  
+
 }
 
 variable "availability_zones" {
   description = "The list of availability zones"
   type        = list(string)
-  
+
 }
 
 variable "custom_ami_id" {
@@ -76,7 +76,7 @@ variable "db_username" {
   default     = "csye6225"
 }
 
-variable "db_password"{
+variable "db_password" {
   description = "DB password"
   default     = "Safari-12345"
 }
@@ -95,6 +95,6 @@ variable "db_multiaz" {
 
 variable "domain_name" {
   description = "Name of domain"
-  type        =  string
+  type        = string
   default     = "dev.aayukacloudnative.me"
 }
