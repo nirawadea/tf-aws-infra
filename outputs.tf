@@ -1,6 +1,6 @@
 output "vpc_id" {
   description = "ID of the VPC"
-  value = aws_vpc.csye6225_vpc.id
+  value       = aws_vpc.csye6225_vpc.id
 }
 
 # Output for the VPC CIDR block
@@ -40,10 +40,10 @@ output "db_subnet_group_name" {
 }
 
 # Output for the EC2 instance ID
-output "ec2_instance_id" {
-  description = "ID of the EC2 instance"
-  value       = aws_instance.app_instance.id
-}
+# output "ec2_instance_id" {
+#   description = "ID of the EC2 instance"
+#   value       = aws_instance.app_instance.id
+# }
 
 # Output for the RDS instance identifier
 output "rds_instance_identifier" {

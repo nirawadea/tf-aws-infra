@@ -1,45 +1,50 @@
 
 # Security Group for EC2 (Application Security Group)
 resource "aws_security_group" "app_sg" {
-  vpc_id      = aws_vpc.csye6225_vpc.id
+  vpc_id = aws_vpc.csye6225_vpc.id
 
   name        = "application-security-group"
-  description = "Allow traffic on ports 22, 80, 443, and application port."
+  description = "Allow traffic on ports 22 and application port."
 
   # Allow inbound SSH traffic
   ingress {
-    description = "Allow SSH"
+    description = "Allow SSH from Load Balancer SG"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]  # Open to all, change if needed
+    cidr_blocks = ["0.0.0.0/0"] # Open to all,
+    # Referencing the load balancer security group as the source
+    # security_groups = [aws_security_group.lb_security_group.id]
   }
 
   # Allow inbound HTTP traffic
-  ingress {
-    description = "Allow HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  #   ingress {
+  #     description = "Allow HTTP"
+  #     from_port   = 80
+  #     to_port     = 80
+  #     protocol    = "tcp"
+  #     cidr_blocks = ["0.0.0.0/0"]
+  #   }
 
   # Allow inbound HTTPS traffic
-  ingress {
-    description = "Allow HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  #   ingress {
+  #     description = "Allow HTTPS"
+  #     from_port   = 443
+  #     to_port     = 443
+  #     protocol    = "tcp"
+  #     cidr_blocks = ["0.0.0.0/0"]
+  #   }
 
   # Allow inbound traffic on application port
   ingress {
-    description = "Allow application traffic"
+    description = "Allow application traffic from Load Balancer SG"
     from_port   = 8080
     to_port     = 8080
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    # Referencing the load balancer security group as the source
+    security_groups = [aws_security_group.lb_security_group.id]
+
   }
 
   # Allow all outbound traffic
@@ -55,28 +60,64 @@ resource "aws_security_group" "app_sg" {
   }
 }
 
+#Load Balancer Security Group
+resource "aws_security_group" "lb_security_group" {
+  name_prefix = "load-balancer-sg"
+  description = "Security group for load balancer to access web application"
+  vpc_id      = aws_vpc.csye6225_vpc.id
+
+  #Allow HTTP traffic on port 80 from anywhere
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow HTTPS traffic on port 443 from anywhere
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow all outbound traffic
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound traffic"
+  }
+
+  tags = {
+    Name = "${var.provider_profile}-load-balancer-sg"
+  }
+}
+
 #Create DB Security Group for RDS
 resource "aws_security_group" "db_security_group" {
   name        = "db_security_group"
   description = "Security Group for RDS Instance,inbound/outbound from the VPC"
   vpc_id      = aws_vpc.csye6225_vpc.id
-#   depends_on  = [aws_vpc.csye6225_vpc]
+  #   depends_on  = [aws_vpc.csye6225_vpc]
 
   # Ingress rule to allow traffic from application security group to MySQL
   ingress {
-    description = "Allow TCP traffic from application security group"
-    from_port   =  3306
-    to_port     =  3306
-    protocol    = "tcp"
-    security_groups = [aws_security_group.app_sg.id]   # Only allow traffic from app security group
+    description     = "Allow TCP traffic from application security group"
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app_sg.id] # Only allow traffic from app security group
   }
 
   # Restrict all outbound traffic (no egress required from the DB to external)
   egress {
-    from_port     = 0
-    to_port       = 0
-    protocol      = "-1"
-    cidr_blocks   = ["0.0.0.0/0"]
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
   tags = {
     Name = "database-security-group"
@@ -88,6 +129,11 @@ resource "aws_db_parameter_group" "db_param_group" {
   name        = "db-param-group"
   family      = "mysql8.0"
   description = "Custom parameter group for MySQL"
+
+  parameter {
+    name  = "max_connections"
+    value = "500"  # Set this to the desired value
+  }
 
   tags = {
     Name = "db-parameter-group"
@@ -110,17 +156,17 @@ locals {
 
 # Create a private S3 bucket with encryption, lifecycle policy, and the ability to delete non-empty buckets
 resource "aws_s3_bucket" "s3_bucket" {
-  bucket = lower(local.bucket_name)
+  bucket        = lower(local.bucket_name)
   force_destroy = true # Allows deletion even if bucket is not empty
 }
 
 # Restrict Public Access to the Bucket
 resource "aws_s3_bucket_public_access_block" "private_bucket" {
-  bucket = aws_s3_bucket.s3_bucket.id
-  block_public_acls        = true
-  block_public_policy      = true
-  ignore_public_acls       = true
-  restrict_public_buckets  = true
+  bucket                  = aws_s3_bucket.s3_bucket.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 
 # Lifecycle Policy for Storage Transition to STANDARD_IA after 30 days
@@ -191,24 +237,24 @@ resource "aws_iam_role_policy" "attach_s3_policy" {
 
 # Create the RDS instance
 resource "aws_db_instance" "rds" {
-  allocated_storage       = var.db_storage_size
-  identifier              = "csye6225"
-  db_subnet_group_name    = aws_db_subnet_group.db_subnet_group.name
-  vpc_security_group_ids  = [aws_security_group.db_security_group.id]
-  instance_class          = var.db_instance_class
-  engine                  = var.db_engine
-  engine_version          = var.db_engine_version
-  db_name                 = var.db_name
-  username                = var.db_username
-  password                = var.db_password
-  publicly_accessible     = var.db_public_access
-  multi_az                = var.db_multiaz
-  parameter_group_name    = aws_db_parameter_group.db_param_group.name
-  skip_final_snapshot     = true
+  allocated_storage      = var.db_storage_size
+  identifier             = "csye6225"
+  db_subnet_group_name   = aws_db_subnet_group.db_subnet_group.name
+  vpc_security_group_ids = [aws_security_group.db_security_group.id]
+  instance_class         = var.db_instance_class
+  engine                 = var.db_engine
+  engine_version         = var.db_engine_version
+  db_name                = var.db_name
+  username               = var.db_username
+  password               = var.db_password
+  publicly_accessible    = var.db_public_access
+  multi_az               = var.db_multiaz
+  parameter_group_name   = aws_db_parameter_group.db_param_group.name
+  skip_final_snapshot    = true
 
   tags = {
-    Name                  = "rds"
-    Environment           = "dev"
+    Name        = "rds"
+    Environment = "dev"
   }
 }
 
@@ -218,22 +264,71 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 }
 
 # EC2 Instance
-resource "aws_instance" "app_instance" {
-  ami                         = var.custom_ami_id
-  instance_type               = "t3.medium"  # Default instance type
-  key_name                    = "cloupApp"
-  subnet_id                   = aws_subnet.public_subnet[0].id
-  vpc_security_group_ids      = [aws_security_group.app_sg.id]
-  iam_instance_profile        = aws_iam_instance_profile.ec2_profile.id
-  associate_public_ip_address = true  # Ensure instance has a public IP
+# resource "aws_instance" "app_instance" {
+#   ami                         = var.custom_ami_id
+#   instance_type               = "t3.medium"  # Default instance type
+#   key_name                    = "cloupApp"
+#   subnet_id                   = aws_subnet.public_subnet[0].id
+#   vpc_security_group_ids      = [aws_security_group.app_sg.id]
+#   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.id
+#   associate_public_ip_address = true  # Ensure instance has a public IP
+#
+#   # Root EBS Volume (SSD GP2, 25GB)
+#   root_block_device {
+#     volume_size           = 25
+#     volume_type           = "gp2"
+#     delete_on_termination = true
+#   }
+#   user_data = <<-EOF
+#     #!/bin/bash
+#     echo "DB_URL=jdbc:mysql://${aws_db_instance.rds.address}/csye6225" >> /etc/environment
+#     echo "DB_USERNAME=${var.db_username}" >> /etc/environment
+#     echo "DB_PASSWORD=${var.db_password}" >> /etc/environment
+#     echo "S3_BUCKET_NAME=${aws_s3_bucket.s3_bucket.id}" >> /etc/environment
+#     echo "FILESYSTEM_DRIVER=s3" >> /etc/environment
+#     echo "REGION=${var.provider_region}" >> /etc/environment
+#
+#     source /etc/environment
+#
+#     #Restart cloudwatch
+#     sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/cloudwatch-config.json -s
+#
+#     # Restart the application to ensure it picks up the environment variables
+#     sudo systemctl restart csye6225.service
+#   EOF
+#
+#   tags = {
+#     Name = "ec2-app-instance"
+#   }
+#   depends_on = [aws_db_instance.rds]
+# }
 
-  # Root EBS Volume (SSD GP2, 25GB)
-  root_block_device {
-    volume_size           = 25
-    volume_type           = "gp2"
-    delete_on_termination = true
+
+#Launch configuration template
+resource "aws_launch_template" "app_launch_template" {
+  name          = "csye6225_asg"
+  image_id      = var.custom_ami_id
+  instance_type = "t3.medium" # Default instance type
+  key_name      = "cloupApp"
+  #   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.id
+
+  network_interfaces {
+    associate_public_ip_address = true # Ensure instance has a public IP
+    security_groups             = [aws_security_group.app_sg.id]
   }
-  user_data = <<-EOF
+
+  # Root EBS Volume
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      volume_size           = 25
+      volume_type           = "gp2"
+      delete_on_termination = true
+    }
+  }
+
+  # User data script
+  user_data = base64encode(<<-EOF
     #!/bin/bash
     echo "DB_URL=jdbc:mysql://${aws_db_instance.rds.address}/csye6225" >> /etc/environment
     echo "DB_USERNAME=${var.db_username}" >> /etc/environment
@@ -250,27 +345,171 @@ resource "aws_instance" "app_instance" {
     # Restart the application to ensure it picks up the environment variables
     sudo systemctl restart csye6225.service
   EOF
+  )
 
-  tags = {
-    Name = "ec2-app-instance"
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_profile.id
+  }
+
+  # Tags for instances launched from this template
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name = "ec2-app-instance"
+    }
+  }
+}
+
+#Auto Scaling Group
+resource "aws_autoscaling_group" "app_asg" {
+  name              = "app_asg"
+  target_group_arns = [aws_lb_target_group.webapp_tg.arn]
+  launch_template {
+    id      = aws_launch_template.app_launch_template.id
+    version = "$Latest"
+  }
+
+  min_size            = 1
+  max_size            = 3
+  desired_capacity    = 1
+  vpc_zone_identifier = [for s in aws_subnet.public_subnet : s.id]
+
+  # Health Check Configuration
+  health_check_type         = "ELB"
+  health_check_grace_period = 300
+  default_cooldown          = 60
+
+  # Auto Scaling Tags
+  tag {
+    key                 = "Name"
+    value               = "ec2-app-instance"
+    propagate_at_launch = true
   }
   depends_on = [aws_db_instance.rds]
 }
 
+#Defining auto scale policies for CPU utilization
+resource "aws_cloudwatch_metric_alarm" "scale_up_alarm" {
+  alarm_name          = "high-cpu-usage"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 5
+  alarm_description   = "This metric checks if CPU usage is higher than 5%."
+  alarm_actions       = [aws_autoscaling_policy.scale_up_policy.arn]
+  actions_enabled     = true
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+  }
+}
+
+#Scale up policy
+resource "aws_autoscaling_policy" "scale_up_policy" {
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  name                   = "webapp_scale-up-policy"
+  policy_type            = "SimpleScaling"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+}
+
+#AS for scale down
+resource "aws_cloudwatch_metric_alarm" "scale_down_alarm" {
+  alarm_name          = "low-cpu-usage"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 3
+  alarm_description   = "This metric checks if CPU usage is lower than 3%."
+  alarm_actions       = [aws_autoscaling_policy.scale_down_policy.arn]
+  actions_enabled     = true
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+  }
+}
+
+#Scale down policy
+resource "aws_autoscaling_policy" "scale_down_policy" {
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  name                   = "webapp_scale-down-policy"
+  policy_type            = "SimpleScaling"
+  scaling_adjustment     = -1
+  adjustment_type        = "ChangeInCapacity"
+}
+
+#Application Load Balancer
+resource "aws_alb" "webapp_lb" {
+  name               = "${var.provider_profile}-app-load-balancer"
+  internal           = false
+  load_balancer_type = "application"
+  subnets            = [for s in aws_subnet.public_subnet : s.id]
+  security_groups    = [aws_security_group.lb_security_group.id]
+
+  tags = {
+    Name = "${var.provider_profile}-app-load-balancer"
+  }
+}
+
+# Target Group for Application Instances
+resource "aws_lb_target_group" "webapp_tg" {
+  name        = "webapp-tg"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.csye6225_vpc.id
+  target_type = "instance"
+
+  health_check {
+    path = "/healthz"
+    # port                = 8080
+    # protocol            = "HTTP"
+    interval            = 60
+    timeout             = 15
+    healthy_threshold   = 2
+    unhealthy_threshold = 5
+    matcher             = "200"
+  }
+  tags = {
+    Name = "webapp-target-group"
+  }
+}
+
+#Listener for Application Load Balancer
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_alb.webapp_lb.arn
+  port              = 80
+  protocol          = "HTTP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.webapp_tg.arn
+  }
+}
+
 # Find the Hosted Zone
-data "aws_route53_zone" "selected_zone"{
+data "aws_route53_zone" "selected_zone" {
   name = var.domain_name
 }
 
 # Create or Update Route 53 A Record
+# Create a new A record that points to the Load balancer.
 resource "aws_route53_record" "app_record" {
   name    = data.aws_route53_zone.selected_zone.name
   type    = "A"
   zone_id = data.aws_route53_zone.selected_zone.id
-  ttl     = "60"
+  #   ttl     = "60"
+  alias {
+    evaluate_target_health = true
+    name                   = aws_alb.webapp_lb.dns_name
+    zone_id                = aws_alb.webapp_lb.zone_id
+  }
   # Set the record to the EC2 instance's public IP
-  records = [aws_instance.app_instance.public_ip]
+  #   records = [aws_launch_template.app_instance.public_ip]
 }
+
 
 data "aws_iam_policy" "agent_policy" {
   arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
