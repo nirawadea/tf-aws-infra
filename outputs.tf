@@ -50,3 +50,15 @@ output "rds_instance_identifier" {
   description = "RDS instance identifier"
   value       = aws_db_instance.rds.identifier
 }
+
+
+output "launch_template_id" {
+  value = aws_launch_template.app_launch_template.id
+  description = "The ID of the launch template for the application."
+}
+
+# AMI ID
+# output "ami_id" {
+#   value = var.custom_ami_id
+#   description = "The AMI ID used for the application instances."
+# }
