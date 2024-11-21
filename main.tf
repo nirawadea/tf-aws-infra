@@ -41,7 +41,6 @@ resource "aws_security_group" "app_sg" {
     from_port   = 8080
     to_port     = 8080
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
     # Referencing the load balancer security group as the source
     security_groups = [aws_security_group.lb_security_group.id]
 
@@ -192,7 +191,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "encrypt" {
   }
 }
 
-# Create an IAM Role for S3 Access.
+# Create an IAM for Role for ec2 to access S3.
 resource "aws_iam_role" "ec2_role" {
   name = "tf-s3-ec2-role"
   assume_role_policy = jsonencode({
@@ -336,6 +335,7 @@ resource "aws_launch_template" "app_launch_template" {
     echo "S3_BUCKET_NAME=${aws_s3_bucket.s3_bucket.id}" >> /etc/environment
     echo "FILESYSTEM_DRIVER=s3" >> /etc/environment
     echo "REGION=${var.provider_region}" >> /etc/environment
+    echo "SNS_TOPIC_ARN=${aws_sns_topic.user_creation_topic.arn}" >> /etc/environment
 
     source /etc/environment
 
@@ -369,14 +369,14 @@ resource "aws_autoscaling_group" "app_asg" {
     version = "$Latest"
   }
 
-  min_size            = 1
-  max_size            = 3
-  desired_capacity    = 1
+  min_size            = 2
+  max_size            = 5
+  desired_capacity    = 2
   vpc_zone_identifier = [for s in aws_subnet.public_subnet : s.id]
 
   # Health Check Configuration
-  health_check_type         = "ELB"
-  health_check_grace_period = 300
+  health_check_type         = "EC2"
+  health_check_grace_period = 500
   default_cooldown          = 60
 
   # Auto Scaling Tags
@@ -397,7 +397,7 @@ resource "aws_cloudwatch_metric_alarm" "scale_up_alarm" {
   namespace           = "AWS/EC2"
   period              = 60
   statistic           = "Average"
-  threshold           = 5
+  threshold           = 50
   alarm_description   = "This metric checks if CPU usage is higher than 5%."
   alarm_actions       = [aws_autoscaling_policy.scale_up_policy.arn]
   actions_enabled     = true
@@ -413,6 +413,7 @@ resource "aws_autoscaling_policy" "scale_up_policy" {
   policy_type            = "SimpleScaling"
   scaling_adjustment     = 1
   adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
 }
 
 #AS for scale down
@@ -440,6 +441,7 @@ resource "aws_autoscaling_policy" "scale_down_policy" {
   policy_type            = "SimpleScaling"
   scaling_adjustment     = -1
   adjustment_type        = "ChangeInCapacity"
+  cooldown               = 300
 }
 
 #Application Load Balancer
@@ -468,7 +470,7 @@ resource "aws_lb_target_group" "webapp_tg" {
     # port                = 8080
     # protocol            = "HTTP"
     interval            = 60
-    timeout             = 15
+    timeout             = 30
     healthy_threshold   = 2
     unhealthy_threshold = 5
     matcher             = "200"
@@ -497,8 +499,8 @@ data "aws_route53_zone" "selected_zone" {
 # Create or Update Route 53 A Record
 # Create a new A record that points to the Load balancer.
 resource "aws_route53_record" "app_record" {
-  name    = data.aws_route53_zone.selected_zone.name
-  type    = "A"
+  name                     = data.aws_route53_zone.selected_zone.name
+  type                     = "A"
   zone_id = data.aws_route53_zone.selected_zone.id
   #   ttl     = "60"
   alias {
@@ -519,6 +521,130 @@ resource "aws_iam_role_policy_attachment" "agent_policy_attachment" {
   role       = aws_iam_role.ec2_role.name
   policy_arn = data.aws_iam_policy.agent_policy.arn
 }
+
+#create sns topic
+resource "aws_sns_topic" "user_creation_topic" {
+  name = "my-user-creation-topic"
+}
+
+#lambda function
+resource "aws_lambda_function" "my_sns_lambda" {
+  function_name = "my_sns_lambda_function"
+  role          =  aws_iam_role.lambda_execution_role.arn
+  handler       = "awslambda.EmailVerificationLambda::handleRequest"
+  runtime       = "java17"
+  memory_size   = 512
+  timeout       = 60
+
+  #path to lambda function code
+  filename = "/Users/macbookpro/Desktop/spring-serverless-1.0-SNAPSHOT.jar"
+
+  environment {
+    variables = {
+      DB_URL                = "jdbc:mysql://${aws_db_instance.rds.address}/csye6225"
+      DB_USERNAME           = var.db_username
+      DB_PASSWORD           = var.db_password
+      SEND_GRID_API_KEY     = var.sendgrid_api_key
+      SEND_GRID_DOMAIN_NAME = var.domain_name
+      SNS_TOPIC_ARN         = aws_sns_topic.user_creation_topic.arn
+    }
+  }
+}
+
+# SNS Subscription to Trigger Lambda
+resource "aws_sns_topic_subscription" "sns_lamdba_subscription" {
+  topic_arn = aws_sns_topic.user_creation_topic.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.my_sns_lambda.arn
+}
+
+#Allow sns to invoke lambda function
+resource "aws_lambda_permission" "allow_sns_invoke" {
+  statement_id    = "AllowExecutionFromSNS"
+  action          = "lambda:InvokeFunction"
+  function_name   = aws_lambda_function.my_sns_lambda.function_name
+  principal       = "sns.amazonaws.com"
+  source_arn      = aws_sns_topic.user_creation_topic.arn
+}
+
+#crete Role and policies for lambda
+resource "aws_iam_role" "lambda_execution_role" {
+  name = "lambda_execution_role"
+
+  assume_role_policy = jsonencode({
+    Version       = "2012-10-17",
+    Statement     = [
+      {
+        Action    = "sts:AssumeRole",
+        Effect    = "Allow",
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Policy for accessing SNS and RDS (customize the resource ARNs)
+resource "aws_iam_policy" "lambda_access_policy" {
+  name = "lambda_access_policy"
+
+  policy         = jsonencode({
+    Version      = "2012-10-17",
+    Statement    = [
+      {
+        Action   = [
+          "sns:Publish"
+        ],
+        Effect   = "Allow",
+        Resource = aws_sns_topic.user_creation_topic.arn
+      },
+      {
+        Action   = [
+          "rds:DescribeDBInstances",
+          "rds-db:connect"
+        ],
+        Effect   = "Allow",
+        Resource = aws_db_instance.rds.arn
+      }
+    ]
+  })
+}
+
+# Attach the policy to the Lambda role
+resource "aws_iam_role_policy_attachment" "lambda_policy_attachment" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = aws_iam_policy.lambda_access_policy.arn
+}
+
+# IAM policy for SNS publishing
+resource "aws_iam_policy" "sns_publish_policy" {
+  name        = "sns_publish_policy"
+  description = "Policy to allow publishing to the SNS topic for user creation"
+
+  policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = [
+      {
+        Effect   = "Allow",
+        Action   = "sns:Publish",
+        Resource = aws_sns_topic.user_creation_topic.arn
+      }
+    ]
+  })
+}
+
+# Attach the sns policy to the IAM role for EC2
+resource "aws_iam_role_policy_attachment" "sns_publish_policy_attachment" {
+  role       = aws_iam_role.ec2_role.name # Replace with your actual IAM role name
+  policy_arn = aws_iam_policy.sns_publish_policy.arn
+}
+
+
+
+
+
+
 
 
 

@@ -98,3 +98,10 @@ variable "domain_name" {
   type        = string
   default     = "dev.aayukacloudnative.me"
 }
+
+variable "sendgrid_api_key" {
+  type        = string
+  description = "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"
+}
+
+
