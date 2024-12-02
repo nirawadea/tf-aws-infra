@@ -245,11 +245,16 @@ resource "aws_db_instance" "rds" {
   engine_version         = var.db_engine_version
   db_name                = var.db_name
   username               = var.db_username
-  password               = var.db_password
+  # password             = var.db_password
+  password               = random_password.db_password.result # Use the generated password
   publicly_accessible    = var.db_public_access
   multi_az               = var.db_multiaz
   parameter_group_name   = aws_db_parameter_group.db_param_group.name
   skip_final_snapshot    = true
+
+  #Enable encryption
+  storage_encrypted      = true
+  kms_key_id             = aws_kms_key.rds_key.arn
 
   tags = {
     Name        = "rds"
@@ -325,13 +330,14 @@ resource "aws_launch_template" "app_launch_template" {
       delete_on_termination = true
     }
   }
+  # echo "DB_URL=jdbc:mysql://${aws_db_instance.rds.address}/csye6225" >> /etc/environment
+  # echo "DB_USERNAME=${var.db_username}" >> /etc/environment
+  # echo "DB_PASSWORD=${random_password.db_password.result}" >> /etc/environment
 
   # User data script
   user_data = base64encode(<<-EOF
     #!/bin/bash
-    echo "DB_URL=jdbc:mysql://${aws_db_instance.rds.address}/csye6225" >> /etc/environment
-    echo "DB_USERNAME=${var.db_username}" >> /etc/environment
-    echo "DB_PASSWORD=${var.db_password}" >> /etc/environment
+    echo "SECRET_NAME"  =${aws_secretsmanager_secret.db_credentials.arn} >> /etc/environment
     echo "S3_BUCKET_NAME=${aws_s3_bucket.s3_bucket.id}" >> /etc/environment
     echo "FILESYSTEM_DRIVER=s3" >> /etc/environment
     echo "REGION=${var.provider_region}" >> /etc/environment
@@ -480,16 +486,43 @@ resource "aws_lb_target_group" "webapp_tg" {
   }
 }
 
-#Listener for Application Load Balancer
-resource "aws_lb_listener" "http" {
+# Listener for Application Load Balancer
+# resource "aws_lb_listener" "http" {
+#   load_balancer_arn = aws_alb.webapp_lb.arn
+#   port              = 80
+#   protocol          = "HTTP"
+#   default_action {
+#     type             = "forward"
+#     target_group_arn = aws_lb_target_group.webapp_tg.arn
+#   }
+# }
+  resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_alb.webapp_lb.arn
-  port              = 80
-  protocol          = "HTTP"
+  port              = 443
+  protocol          = "HTTPS"
+
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  certificate_arn   = aws_acm_certificate.dev_certificate.arn
+
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.webapp_tg.arn
   }
+  depends_on = [aws_route53_record.cert_validation]
 }
+
+resource "aws_route53_record" "cert_validation" {
+  for_each = { for dvo in aws_acm_certificate.dev_certificate.domain_validation_options : dvo.domain_name => dvo }
+
+  zone_id = data.aws_route53_zone.selected_zone.id
+  name    = each.value.resource_record_name
+  type    = each.value.resource_record_type
+  ttl     = 300
+  records = [each.value.resource_record_value]
+
+  depends_on = [aws_acm_certificate.dev_certificate]
+}
+
 
 # Find the Hosted Zone
 data "aws_route53_zone" "selected_zone" {
@@ -541,10 +574,8 @@ resource "aws_lambda_function" "my_sns_lambda" {
 
   environment {
     variables = {
-      DB_URL                = "jdbc:mysql://${aws_db_instance.rds.address}/csye6225"
-      DB_USERNAME           = var.db_username
-      DB_PASSWORD           = var.db_password
-      SEND_GRID_API_KEY     = var.sendgrid_api_key
+      # SEND_GRID_API_KEY     = var.sendgrid_api_key
+      SEND_GRID_SECRET_NAME = "sendgrid-api-key-new6"
       SEND_GRID_DOMAIN_NAME = var.domain_name
       SNS_TOPIC_ARN         = aws_sns_topic.user_creation_topic.arn
     }
@@ -594,10 +625,14 @@ resource "aws_iam_policy" "lambda_access_policy" {
     Statement    = [
       {
         Action   = [
-          "sns:Publish"
+          "sns:Publish",
+          "secretsmanager:GetSecretValue"
         ],
         Effect   = "Allow",
-        Resource = aws_sns_topic.user_creation_topic.arn
+        Resource  = [
+          aws_sns_topic.user_creation_topic.arn,
+          aws_secretsmanager_secret.sendgrid_api_key.arn
+        ]
       },
       {
         Action   = [
@@ -606,6 +641,22 @@ resource "aws_iam_policy" "lambda_access_policy" {
         ],
         Effect   = "Allow",
         Resource = aws_db_instance.rds.arn
+      },
+      {
+        Effect   = "Allow",
+        Action   = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        Resource = "arn:aws:logs:us-east-1:047719656602:log-group:/aws/lambda/my_sns_lambda_function:*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = [
+          "kms:Decrypt"
+        ],
+        Resource = aws_secretsmanager_secret.sendgrid_api_key.kms_key_id
       }
     ]
   })
@@ -638,6 +689,180 @@ resource "aws_iam_policy" "sns_publish_policy" {
 resource "aws_iam_role_policy_attachment" "sns_publish_policy_attachment" {
   role       = aws_iam_role.ec2_role.name # Replace with your actual IAM role name
   policy_arn = aws_iam_policy.sns_publish_policy.arn
+}
+
+#Auto-Generate DB password
+resource "random_password" "db_password" {
+  length           = 16
+  special          = true
+  override_special = "!#$%&*+,-.:;<=>?[]^_{|}~"  # Allow only specific special characters if needed
+}
+
+#create KMS key for EC2
+resource "aws_kms_key" "ec2_key" {
+  description         = "KMS key for EC2 encryption"
+  enable_key_rotation = true
+}
+
+#create KMS key for RDS
+resource "aws_kms_key" "rds_key" {
+  description         = "KMS key for RDS encryption"
+  enable_key_rotation = true
+}
+
+#create KMS key for s3
+resource "aws_kms_key" "s3_key" {
+  description         = "KMS key for S3 bucket encryption"
+  enable_key_rotation = true
+}
+
+#create KMS key for secret manager
+resource "aws_kms_key" "secrets_key" {
+  description         = "KMS key for Secrets Manager encryption"
+  enable_key_rotation = true
+}
+
+# Define the secret for SendGrid API key
+resource "aws_secretsmanager_secret" "sendgrid_api_key" {
+  name        = "sendgrid-api-key-new6"
+  description = "SendGrid API key for email service"
+  kms_key_id  = aws_kms_key.secrets_key.arn
+}
+
+# Store the SendGrid API key in the secret
+resource "aws_secretsmanager_secret_version" "sendgrid_api_key_version" {
+  secret_id     = aws_secretsmanager_secret.sendgrid_api_key.id
+  secret_string = jsonencode({
+    # api_key     = "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"
+    api_key = var.sendgrid_api_key
+  })
+}
+
+# Store the db secret in Secrets Manager
+resource "aws_secretsmanager_secret" "db_credentials" {
+  name       = "db_credentials_new6"
+  kms_key_id = aws_kms_key.secrets_key.arn
+}
+
+# Add the secret version with the generated password
+resource "aws_secretsmanager_secret_version" "db_credentials_version" {
+  secret_id     = aws_secretsmanager_secret.db_credentials.id
+
+  secret_string = jsonencode({
+    DB_URL      = "jdbc:mysql://${aws_db_instance.rds.address}/csye6225",
+    DB_USERNAME = var.db_username,
+    DB_PASSWORD = random_password.db_password.result
+  })
+}
+
+# IAM policy for accessing the secret
+resource "aws_iam_policy" "ec2_secrets_access_policy" {
+  name           = "ec2-secrets-access-policy"
+  policy         = jsonencode({
+    Version      = "2012-10-17",
+    Statement    = [
+      {
+        Action   = ["secretsmanager:GetSecretValue"],
+        Effect   = "Allow",
+        # Resource = aws_secretsmanager_secret.db_credentials.arn
+        Resource = [
+          aws_secretsmanager_secret.db_credentials.arn,
+          aws_secretsmanager_secret.sendgrid_api_key.arn
+        ]
+      }
+    ]
+  })
+}
+
+# Attach the secrets policy to the EC2 IAM role
+resource "aws_iam_role_policy_attachment" "ec2_secrets_policy_attachment" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = aws_iam_policy.ec2_secrets_access_policy.arn
+}
+
+# Attach the policy to Lambda IAM role
+resource "aws_iam_role_policy_attachment" "lambda_secrets_policy_attachment" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = aws_iam_policy.ec2_secrets_access_policy.arn
+}
+
+# IAM Policy to allow access to KMS keys
+resource "aws_iam_policy" "kms_policy" {
+  name   = "kms-access-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect    = "Allow",
+        Action    = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
+        ],
+        Resource  = [
+          aws_kms_key.ec2_key.arn,
+          aws_kms_key.rds_key.arn,
+          aws_kms_key.s3_key.arn,
+          aws_kms_key.secrets_key.arn
+        ]
+      }
+    ]
+  })
+}
+
+#Lambda role requires additional permissions for accessing Secrets Manager, RDS, and SNS:
+# resource "aws_iam_policy" "lambda_access_policy" {
+#   name   = "lambda-access-policy"
+#
+#   policy = jsonencode({
+#     Version = "2012-10-17",
+#     Statement = [
+#       {
+#         Effect    = "Allow",
+#         Action    = [
+#           "sns:Publish",
+#           "secretsmanager:GetSecretValue"
+#         ],
+#         Resource  = [
+#           aws_sns_topic.user_creation_topic.arn,
+#           aws_secretsmanager_secret.sendgrid_api_key.arn
+#         ]
+#       },
+#       {
+#         Effect    = "Allow",
+#         Action    = [
+#           "rds:DescribeDBInstances",
+#           "rds-db:connect"
+#         ],
+#         Resource  = aws_db_instance.rds.arn
+#       }
+#     ]
+#   })
+# }
+
+#attch this above policy to lambda
+resource "aws_iam_role_policy_attachment" "lambda_access_policy_attachment" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = aws_iam_policy.lambda_access_policy.arn
+}
+
+
+# Attach the policy to relevant roles
+resource "aws_iam_role_policy_attachment" "attach_kms_policy" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = aws_iam_policy.kms_policy.arn
+}
+
+#ACM to provision an SSL certificate
+resource "aws_acm_certificate" "dev_certificate" {
+  domain_name       = var.domain_name
+  validation_method = "DNS"
+
+  tags = {
+    Environment = "dev"
+  }
 }
 
 
