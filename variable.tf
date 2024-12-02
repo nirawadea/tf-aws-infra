@@ -101,7 +101,7 @@ variable "domain_name" {
 
 variable "sendgrid_api_key" {
   type        = string
-  description = "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"
+  default = "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"
 }
 
 
